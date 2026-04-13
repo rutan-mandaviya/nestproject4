@@ -75,7 +75,7 @@ export class RoutesService {
     };
 
     try {
-      const totalRows = await this.excelService.importFromCsvStream(
+      const totalRows = await this.excelService.importFileStream(
         file,
         handleChunkInsert,
         20000,

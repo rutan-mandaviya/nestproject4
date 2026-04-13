@@ -19,23 +19,110 @@ export class PricelistService {
     private readonly excelService: ExcelService,
   ) {}
 
+  private safeString(value: unknown): string {
+    if (typeof value === 'string') {
+      return value.trim();
+    }
+    if (value != null) {
+      return String(value).trim();
+    }
+    return '';
+  }
+
+  async importFile(file: Express.Multer.File) {
+    const fileName = file.originalname.toLowerCase();
+    const isCsv = file.mimetype === 'text/csv' || fileName.endsWith('.csv');
+    const isXlsx =
+      fileName.endsWith('.xlsx') || file.mimetype.includes('spreadsheetml');
+
+    if (!isCsv && !isXlsx) {
+      throw new BadRequestException(
+        'Please upload a valid .csv or .xlsx file for bulk imports.',
+      );
+    }
+
+    console.log(
+      `--- PREPARING PRICELIST BULK IMPORT: ${file.originalname} ---`,
+    );
+    let invalidRowsCount = 0;
+
+    const handleChunkInsert = async (rawChunk: any[]) => {
+      const cleanData: any[] = [];
+
+      for (const row of rawChunk) {
+        const name = this.safeString(row.Name) || this.safeString(row.name);
+
+        if (name) {
+          cleanData.push({
+            name: name,
+            markup:
+              this.safeString(row.Markup) || this.safeString(row.markup) || '0',
+            routing_type: Number(row['Routing Type'] || row.routing_type) || 0,
+            initially_increment:
+              Number(row['Initial Increment'] || row.initially_increment) || 1,
+            inc: Number(row.Increment || row.inc) || 1,
+            status: Number(row.Status || row.status) || 1,
+            reseller_id: Number(row['Reseller ID'] || row.reseller_id) || 0,
+          });
+        } else {
+          invalidRowsCount++;
+        }
+      }
+
+      if (cleanData.length > 0) {
+        await this.pricelistModel.bulkCreate(cleanData, {
+          validate: false,
+          logging: false,
+          ignoreDuplicates: true,
+        });
+        console.log(`🚀 DB Inserted: ${cleanData.length} Pricelist rows...`);
+      }
+    };
+
+    try {
+      const totalRows = await this.excelService.importFileStream(
+        file,
+        handleChunkInsert,
+        20000,
+      );
+
+      return {
+        success: true,
+        totalRowsProcessed: totalRows,
+        invalidRowsSkipped: invalidRowsCount,
+        message: 'High-Speed bulk import completed successfully!',
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      console.error('PRICELIST BULK IMPORT ERROR:', errorMessage);
+      throw new BadRequestException(
+        `Failed to import file data: ${errorMessage}`,
+      );
+    }
+  }
+
   async exportToExcelStream(res: Response): Promise<void> {
+    console.log('--- EXPORTING PRICELISTS VIA GENERIC STREAM ---');
+
     const columns = [
-      { header: 'Name ', key: 'name', width: 25 },
-      { header: 'Markup', key: 'markup', width: 15 },
+      { header: 'ID', key: 'id', width: 10 },
+      { header: 'Name', key: 'name', width: 30 },
+      { header: 'Markup', key: 'markup', width: 20 },
       { header: 'Routing Type', key: 'routing_type', width: 15 },
-      { header: 'Initially Increment', key: 'initially_increment', width: 20 },
-      { header: 'Inc', key: 'inc', width: 10 },
+      { header: 'Initial Increment', key: 'initially_increment', width: 18 },
+      { header: 'Increment', key: 'inc', width: 15 },
       { header: 'Status', key: 'status', width: 10 },
       { header: 'Reseller ID', key: 'reseller_id', width: 15 },
     ];
 
-    const fetchPricelistChunk = async (limit: number, offset: number) => {
+    const fetchPricelistsChunk = async (limit: number, offset: number) => {
       return await this.pricelistModel.findAll({
         raw: true,
         limit: limit,
         offset: offset,
         attributes: [
+          'id',
           'name',
           'markup',
           'routing_type',
@@ -51,81 +138,8 @@ export class PricelistService {
       res,
       'Pricelists',
       columns,
-      fetchPricelistChunk,
+      fetchPricelistsChunk,
     );
-  }
-
-  async importFromCsv(file: Express.Multer.File) {
-    this.validateCsvFile(file);
-
-    let invalidRowsCount = 0;
-
-    const handleChunkInsert = async (rawChunk: any[]) => {
-      const cleanData: any[] = [];
-
-      for (const row of rawChunk) {
-        if (this.isValidRow(row)) {
-          cleanData.push(this.formatRowForDb(row));
-        } else {
-          invalidRowsCount++;
-        }
-      }
-
-      await this.insertBulkData(cleanData);
-    };
-
-    try {
-      const CHUNK_SIZE = 20000;
-      const totalRows = await this.excelService.importFromCsvStream(
-        file,
-        handleChunkInsert,
-        CHUNK_SIZE,
-      );
-
-      return {
-        success: true,
-        totalRowsProcessed: totalRows,
-        invalidRowsSkipped: invalidRowsCount,
-        message: 'Pricelist CSV Import completed successfully!',
-      };
-    } catch (error) {
-      throw new Error(`Failed to import Pricelist data: ${error.message}`);
-    }
-  }
-
-  private validateCsvFile(file: Express.Multer.File) {
-    if (file.mimetype !== 'text/csv' && !file.originalname.endsWith('.csv')) {
-      throw new BadRequestException('Please upload a valid .csv file.');
-    }
-  }
-
-  private isValidRow(row: any): boolean {
-    const name = row['Name']?.toString().trim();
-    return Boolean(name);
-  }
-
-  private formatRowForDb(row: any): any {
-    return {
-      name: row['Name']?.toString().trim().substring(0, 30),
-      markup: row['Markup']?.toString().trim().substring(0, 50) || '0',
-      routing_type: Number(row['Routing Type']) || 1,
-      initially_increment: Number(row['Initially Increment']) || 1,
-      inc: Number(row['Inc']) || 1,
-      status:
-        row['Status'] !== undefined && row['Status'] !== ''
-          ? Number(row['Status'])
-          : 1,
-      reseller_id: Number(row['Reseller ID']) || null,
-    };
-  }
-
-  private async insertBulkData(cleanData: any[]) {
-    if (cleanData.length === 0) return;
-
-    await this.pricelistModel.bulkCreate(cleanData, {
-      validate: false,
-      logging: false,
-    });
   }
 
   async create(dto: CreatePricelistDto) {

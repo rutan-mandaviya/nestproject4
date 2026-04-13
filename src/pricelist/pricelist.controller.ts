@@ -46,7 +46,7 @@ export class PricelistController {
   @Post('import')
   @UseInterceptors(FileInterceptor('file'))
   async importCsv(@UploadedFile() file: Express.Multer.File) {
-    return this.pricelistService.importFromCsv(file);
+    return this.pricelistService.importFile(file);
   }
 
   @Post()
